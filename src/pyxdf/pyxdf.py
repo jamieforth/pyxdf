@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 class StreamData:
     """Temporary per-stream data."""
 
-    def __init__(self, xml):
-        """Init a new StreamData object from a stream header."""
+    def __init__(self, xml, stream_id):
+        """Init a new StreamData object from a stream header and ID."""
         fmts = dict(
             double64=np.float64,
             float32=np.float32,
@@ -40,6 +40,8 @@ class StreamData:
             int8=np.int8,
             int64=np.int64,
         )
+        # stream_id
+        self.stream_id = stream_id
         # number of channels
         self.nchns = int(xml["info"]["channel_count"][0])
         # nominal sampling rate in Hz
@@ -71,6 +73,7 @@ def load_xdf(
     select_streams=None,
     *,
     on_chunk=None,
+    handle_non_monotonic=False,
     synchronize_clocks=True,
     handle_clock_resets=True,
     dejitter_timestamps=True,
@@ -113,6 +116,13 @@ def load_xdf(
 
         verbose : Passing True will set logging level to DEBUG, False will set it to
           WARNING, and None will use root logger level. (default: None)
+
+        handle_non_monotonic : bool | None
+          Whether to check for, and possibly sort, samples that are not in
+          ascending order of time. (default: False)
+          - bool : 'False' check only, warning when data is non-monotonic
+                   'True' check and sort non-monotonic data
+          - None : Disable non-monotonicity check
 
         synchronize_clocks : Whether to enable clock synchronization based on
           ClockOffset chunks. (default: true)
@@ -292,7 +302,7 @@ def load_xdf(
                 streams[StreamId] = hdr
                 logger.debug("  found stream " + hdr["info"]["name"][0])
                 # initialize per-stream temp data
-                temp[StreamId] = StreamData(hdr)
+                temp[StreamId] = StreamData(hdr, StreamId)
             elif tag == 3:
                 # read [Samples] chunk...
                 # noinspection PyBroadException
@@ -334,7 +344,7 @@ def load_xdf(
                 f.read(chunklen - 2)
 
     # Concatenate the signal across chunks
-    for stream_id, stream in temp.items():
+    for stream in temp.values():
         if stream.time_stamps:
             # stream with non-empty list of chunks
             stream.time_stamps = np.concatenate(stream.time_stamps)
@@ -342,10 +352,6 @@ def load_xdf(
                 stream.time_series = list(itertools.chain(*stream.time_series))
             else:
                 stream.time_series = np.concatenate(stream.time_series)
-            # Handle samples that may have arrived out-of-order, sorting
-            # data by ground truth timestamps if necessary. Identical
-            # timestamps will remain, but can be handled by dejittering.
-            stream = _ensure_sorted(stream_id, stream)
         else:
             # stream without any chunks
             stream.time_stamps = np.zeros((0,))
@@ -353,6 +359,25 @@ def load_xdf(
                 stream.time_series = []
             else:
                 stream.time_series = np.zeros((0, stream.nchns))
+
+    # perform non-monotonicity handling if requested
+    if handle_non_monotonic is None:
+        logger.info("Skipping non-monotonicity handling...")
+    elif not handle_non_monotonic:
+        # check for non-monotonicity only
+        if _check_monotonicity(temp):
+            # all streams are monotonic
+            logger.info("All streams are monotonic, continuing...")
+        else:
+            # some data is non-monotonic, but we will not fix it
+            msg = (
+                "Non-monotonic streams detected - "
+                "consider loading with 'handle_non_monotonic=True'."
+            )
+            logger.warning(msg)
+    elif handle_non_monotonic:
+        # check and sort any non-monotonic data
+        temp = _fix_non_monotonicity(temp)
 
     # perform (fault-tolerant) clock synchronization if requested
     if synchronize_clocks:
@@ -538,22 +563,125 @@ def _scan_forward(f):
             return False
 
 
-def _ensure_sorted(stream_id, stream):
+def _check_monotonicity(streams):
+    """Check monotonicity of all streams.
+
+    Parameters
+    ----------
+    streams : dict
+        Dictionary of stream_id: StreamData.
+
+    Returns
+    -------
+    monotonic : bool
+        True if all streams are monotonic, otherwise False.
+    """
+    monotonic = [_is_monotonic(stream)
+                 for stream in streams.values()]
+    return all(monotonic)
+
+
+def _is_monotonic(stream):
+    """Check monotonicity of an individual stream.
+
+    Parameters
+    ----------
+    stream: StreamData
+
+    Returns
+    -------
+    monotonic : bool
+        True if stream is monotonic, otherwise False.
+    """
+    # Time-intervals between successive timestamps.
     diffs = np.diff(stream.time_stamps)
-    non_strict_inc_count = np.sum(diffs <= 0)
-    if non_strict_inc_count > 0:
-        msg = "  stream %d not monotonic %d sample(s) out-of-order. Sorting..."
-        logger.info(msg, stream_id, non_strict_inc_count)
+    # Count non-increasing time intervals.
+    non_inc_count = np.sum(diffs <= 0)
+
+    # Monotonic.
+    if non_inc_count == 0:
+        logger.info("  stream %d is monotonic", stream.stream_id)
+        return True
+
+    # Count strictly decreasing time intervals.
+    strict_dec_count = np.sum(diffs < 0)
+    duplicate_timestamp_count = non_inc_count - strict_dec_count
+
+    # Monotonic with duplicates.
+    if duplicate_timestamp_count == non_inc_count:
+        msg = (
+            "  stream %d is monotonic, "
+            "but contains %d duplicate timestamps"
+        )
+        logger.warning(msg, stream.stream_id, duplicate_timestamp_count)
+        return True
+
+    # Non-monotonic.
+    non_inc_pc = non_inc_count / len(diffs) * 100
+    monotonicity_info = (
+        non_inc_count,
+        "(<0.01%)" if non_inc_pc < 0.005 else f"({non_inc_pc:.2f}%)",
+        f"timestamp{'s' if non_inc_count > 1 else ''}",
+        duplicate_timestamp_count
+    )
+    msg = "  stream %d non-monotonic: %d %s non-increasing %s (%d duplicated)"
+    logger.warning(msg, stream.stream_id, *monotonicity_info)
+    return False
+
+
+def _fix_non_monotonicity(streams):
+    """Ensure all non-monotonic streams are sorted by ground truth timestamps.
+
+    Parameters
+    ----------
+    streams : dict
+        Dictionary of stream_id: StreamData (possibly non-monotonic).
+
+    Returns
+    -------
+    streams : dict
+        Dictionary of stream_id: StreamData (monotonic).
+
+    Monotonic streams are returned as-is.
+    """
+    streams = {stream_id: _sort_stream_data(stream)
+               for stream_id, stream in streams.items()}
+    return streams
+
+
+def _sort_stream_data(stream):
+    """Sort stream data by ground truth timestamps.
+
+    Parameters
+    ----------
+    stream: StreamData (possibly non-monotonic)
+
+    Returns
+    -------
+    stream : StreamData (monotonic)
+        With sorted timestamps and timeseries data, if necessary.
+
+    Non-monotonic streams are (stable) sorted in ascending order of
+    ground truth timestamps. Both timestamp and timeseries arrays are
+    modified, keeping all samples aligned with their original
+    timestamp. This does not modify timestamps or sample values.
+
+    Monotonic streams are returned as-is.
+
+    Stream may still contain identically timestamped samples, but these
+    can be handled by dejittering.
+    """
+    if not _is_monotonic(stream):
+        logger.warning("    -> sorting stream %d", stream.stream_id)
+        # Determine monotonic timestamp ordering.
         ind = np.argsort(stream.time_stamps, kind="stable")
+        # Reorder timestamps in place.
         stream.time_stamps = stream.time_stamps[ind]
+        # Reorder timeseries data.
         if stream.fmt == "string":
             stream.time_series = np.array(stream.time_series)[ind].tolist()
         else:
             stream.time_series = stream.time_series[ind]
-        identical_timestamp_count = len(diffs) - np.count_nonzero(diffs)
-        if identical_timestamp_count > 0:
-            msg = "  stream %d contains %d identical timestamp(s)."
-            logger.info(msg, stream_id, identical_timestamp_count)
     return stream
 
 
@@ -652,7 +780,9 @@ def _detect_breaks(stream, threshold_seconds=1.0, threshold_samples=500):
     """Detect breaks in the time_stamps of a stream."""
     # Identify breaks in the time_stamps
     diffs = np.diff(stream.time_stamps)
-    b_breaks = diffs > np.max((threshold_seconds, threshold_samples * stream.tdiff))
+    b_breaks = np.abs(diffs) > np.max(
+        (threshold_seconds, threshold_samples * stream.tdiff)
+    )
     # find indices (+ 1 to compensate for lost sample in np.diff)
     break_inds = np.where(b_breaks)[0] + 1
     return break_inds
