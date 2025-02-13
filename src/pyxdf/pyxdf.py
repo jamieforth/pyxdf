@@ -652,6 +652,17 @@ def _clock_sync(
     return streams
 
 
+def _detect_breaks(stream, threshold_seconds=1.0, threshold_samples=500):
+    """Detect breaks in the time_stamps of a stream.
+
+    Returns:
+        b_breaks : 1D bool array representing breaks between values.
+    """
+    diffs = np.diff(stream.time_stamps)
+    b_breaks = diffs > np.max((threshold_seconds, threshold_samples * stream.tdiff))
+    return b_breaks
+
+
 def _jitter_removal(streams, threshold_seconds=1, threshold_samples=500):
     for stream_id, stream in streams.items():
         stream.effective_srate = 0  # will be recalculated if possible
