@@ -92,7 +92,6 @@ def test_detect_breaks_gap_in_positive():
 # time-intervals exceeding threshold
 
 
-@pytest.mark.xfail
 def test_detect_breaks_reverse():
     time_stamps = list(reversed(range(-5, 5)))
     stream = MockStreamData(time_stamps=time_stamps, tdiff=1)
@@ -102,7 +101,6 @@ def test_detect_breaks_reverse():
     assert breaks.size == len(time_stamps) - 1
 
 
-@pytest.mark.xfail
 def test_detect_breaks_non_monotonic_gap_in_negative():
     time_stamps = [-4, -7, -6, -5, -3, -2, -1, 0]
     stream = MockStreamData(time_stamps=time_stamps, tdiff=1)
@@ -123,7 +121,6 @@ def test_detect_breaks_non_monotonic_gap_in_negative():
     assert breaks.size == len(time_stamps) - 1
 
 
-@pytest.mark.xfail
 def test_detect_breaks_non_monotonic_gap_in_positive():
     time_stamps = [4, 1, 2, 3, 5, 6, 7, 8]
     stream = MockStreamData(time_stamps=time_stamps, tdiff=1)

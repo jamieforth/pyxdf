@@ -51,7 +51,6 @@ def test_jitter_removal_two_segments(segments, t_starts):
     np.testing.assert_allclose(stream.effective_srate, srate)
 
 
-@pytest.mark.xfail
 @pytest.mark.parametrize(
     "segments, t_starts",
     [
@@ -77,7 +76,6 @@ def test_jitter_removal_two_segments_non_monotonic(segments, t_starts):
     np.testing.assert_allclose(stream.effective_srate, srate)
 
 
-@pytest.mark.xfail
 def test_jitter_removal_glitch():
     srate = 1
     tdiff = 1
