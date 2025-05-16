@@ -427,11 +427,14 @@ def load_xdf(
     ):
         logger.info(f" sorting non-monotonic data: {handle_non_monotonic.name}...")
         for stream_id, stream in temp.items():
-            _sort_stream_data(
-                stream_id,
-                stream,
-                handle_non_monotonic is HandleNonMonoState.TRUST_TIMESTAMPS,
-            )
+            if stream.srate != 0:
+                _sort_stream_data(
+                    stream_id,
+                    stream,
+                    handle_non_monotonic is HandleNonMonoState.TRUST_TIMESTAMPS,
+                )
+            else:
+                logger.warn(f"Not sorting irregular rate stream {stream_id}")
 
     # perform jitter removal if requested
     if dejitter_timestamps:
