@@ -258,7 +258,9 @@ def load_xdf(
             except EOFError:
                 break
             except Exception:
-                logger.exception("Error reading chunk length")
+                logger.exception(
+                    f"Last stream read {StreamId}: Error reading chunk length"
+                )
                 # if there's more data available (i.e. a read() succeeds), find the next
                 # boundary chunk
                 if f.read(1):
@@ -338,7 +340,7 @@ def load_xdf(
                     # an error occurred (perhaps a chopped-off file): emit a warning and
                     # scan forward to the next recognized chunk
                     logger.error(
-                        f"found likely XDF file corruption ({e}), scanning forward to "
+                        f"Stream {StreamId}: found likely XDF file corruption ({e}), scanning forward to "
                         "next boundary chunk."
                     )
                     _scan_forward(f)
@@ -556,7 +558,9 @@ def _read_varlen_int(f):
     elif nbytes == 8:
         return struct.unpack("<Q", f.read(8))[0]
     else:
-        raise RuntimeError("invalid variable-length integer encountered.")
+        raise RuntimeError(
+            f"invalid variable-length integer encountered {nbytes} at byte {f.tell()}."
+        )
 
 
 def _xml2dict(t):
