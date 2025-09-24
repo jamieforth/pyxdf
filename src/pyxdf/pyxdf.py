@@ -32,6 +32,7 @@ class HandleNonMonoState(Enum):
     WARN = "warn"
     TRUST_TIMESERIES = "trust_timeseries"
     TRUST_TIMESTAMPS = "trust_timestamps"
+    DROP = "drop"
 
 
 class StreamData:
@@ -421,10 +422,10 @@ def load_xdf(
         )
 
     # perform non-monotonicity handling if requested
-    if (
-        handle_non_monotonic is HandleNonMonoState.TRUST_TIMESERIES
-        or handle_non_monotonic is HandleNonMonoState.TRUST_TIMESTAMPS
-    ):
+    if handle_non_monotonic in [
+        HandleNonMonoState.TRUST_TIMESERIES,
+        HandleNonMonoState.TRUST_TIMESTAMPS,
+    ]:
         logger.info(f" sorting non-monotonic data: {handle_non_monotonic.name}...")
         for stream_id, stream in temp.items():
             if stream.srate != 0:
@@ -435,6 +436,10 @@ def load_xdf(
                 )
             else:
                 logger.warn(f"Not sorting irregular rate stream {stream_id}")
+    elif handle_non_monotonic is HandleNonMonoState.DROP:
+        logger.info(" dropping non-monotonic samples")
+        for stream_id, stream in temp.items():
+            _drop_non_monotonic(stream_id, stream)
 
     # perform jitter removal if requested
     if dejitter_timestamps:
@@ -739,7 +744,7 @@ def _sort_stream_data(stream_id, stream, reorder_timeseries=False):
         return stream
     clock_segments = stream.clock_segments
     if len(clock_segments) == 0:
-        # Clocks have not been synchronized.
+        # Clocks have not been synchronized
         clock_segments = [(0, len(stream.time_stamps) - 1)]  # inclusive
     for start_i, stop_i in clock_segments:
         ts_slice = slice(start_i, stop_i + 1)
@@ -747,18 +752,44 @@ def _sort_stream_data(stream_id, stream, reorder_timeseries=False):
             logger.info(
                 f"Sorting stream {stream_id}: clock segment {start_i}-{stop_i}."
             )
-            # Determine monotonic timestamp ordering.
+            # Determine monotonic timestamp ordering
             ind = np.argsort(stream.time_stamps[ts_slice], kind="stable")
-            # Reorder timestamps in place.
+            # Reorder timestamps in place
             stream.time_stamps[ts_slice] = stream.time_stamps[ts_slice][ind]
             if reorder_timeseries:
-                # Reorder timeseries data to align with timestamps.
+                # Reorder timeseries data to align with timestamps
                 if stream.fmt == "string":
                     stream.time_series[ts_slice] = np.array(
                         stream.time_series[ts_slice]
                     )[ind].tolist()
                 else:
                     stream.time_series[ts_slice] = stream.time_series[ts_slice][ind]
+    return stream
+
+
+def _drop_non_monotonic(stream_id, stream):
+    if len(stream.time_stamps) <= 1:
+        return stream
+    clock_segments = stream.clock_segments
+    if len(clock_segments) == 0:
+        # Clocks have not been synchronized
+        clock_segments = [(0, len(stream.time_stamps) - 1)]  # inclusive
+    for i, (start_i, stop_i) in zip(range(len(clock_segments)), clock_segments):
+        ts_slice = slice(start_i, stop_i + 1)
+        if not _monotonic_increasing(stream.time_stamps[ts_slice]).result:
+            # Find non-monotonic timestamps
+            non_mono = (np.where(np.diff(stream.time_stamps[ts_slice]) < 0))[0]
+            logger.warning(
+                (
+                    f"Dropping {len(non_mono)} samples in stream {stream_id}: "
+                    f"clock segment {start_i}-{stop_i}."
+                )
+            )
+            stream.time_stamps = np.delete(stream.time_stamps, non_mono + 1)
+            stream.time_series = np.delete(stream.time_series, non_mono + 1, axis=0)
+            # Update clock segment.
+            if len(stream.clock_segments) > 0:
+                stream.clock_segments[i] = (start_i, stop_i - len(non_mono))
     return stream
 
 
