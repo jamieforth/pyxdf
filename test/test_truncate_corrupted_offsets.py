@@ -210,3 +210,210 @@ def test_no_crash_when_footer_info_is_none():
 
     # Stream 2 should be unchanged
     assert len(result[2].time_stamps) == 50
+
+
+def test_truncation_vs_no_truncation():
+    """Verify clock sync handles corrupt clock offsets
+
+    This suggest truncation is unnecessary for synchronisation. However, the
+    extra time-stamp and sample could still be junk.
+    """
+    n_samples = 100
+    n_offsets = 20
+    clock_tdiff = 5
+    clock_offset_value = -0.001  # Normal offset: -1ms
+
+    # Create stream with extra sample AND corrupted last clock offset
+    time_stamps = np.linspace(0, 101, n_samples + 1)  # One extra sample
+    clock_times = [i * clock_tdiff for i in range(n_offsets)]
+    clock_values = [clock_offset_value] * n_offsets
+
+    # Corrupt the last clock offset (mimics the real bug pattern)
+    clock_times.append(clock_times[-1] + 800000)  # Huge time jump
+    clock_values.append(-750000)  # Huge corrupted value
+
+    temp_trunc = {
+        1: MockStreamData(
+            time_stamps=time_stamps,
+            clock_times=clock_times,
+            clock_values=clock_values,
+        )
+    }
+
+    temp_no_trunc = {
+        1: MockStreamData(
+            time_stamps=time_stamps,
+            clock_times=clock_times,
+            clock_values=clock_values,
+        )
+    }
+
+    streams = {1: {"footer": {"info": {"sample_count": [str(n_samples)]}}}}
+
+    # Apply truncation
+    temp_trunc = _truncate_corrupted_offsets(temp_trunc, streams)
+
+    # Sync truncated stream
+    temp_trunc = _clock_sync(temp_trunc)
+
+    # Truncated: Verify clock segments
+    expected_clock_segments = [(0, 99)]
+
+    np.testing.assert_equal(
+        temp_trunc[1].clock_segments,
+        expected_clock_segments,
+    )
+
+    # Truncated: Verify clock sync
+    expected_timestamps = (time_stamps + clock_offset_value)[:n_samples]
+
+    np.testing.assert_allclose(
+        temp_trunc[1].time_stamps,
+        expected_timestamps,
+        atol=1e-6,
+    )
+
+    # Sync non-truncated stream
+    temp_no_trunc = _clock_sync(temp_no_trunc)
+
+    # Non-truncated: Verify clock segments
+    expected_clock_segments = [(0, 100)]
+
+    np.testing.assert_equal(
+        temp_no_trunc[1].clock_segments,
+        expected_clock_segments,
+    )
+
+    # Non-truncated: Verify clock sync
+    expected_timestamps = (time_stamps + clock_offset_value)
+
+    np.testing.assert_allclose(
+        temp_no_trunc[1].time_stamps,
+        expected_timestamps,
+        atol=1e-6,
+    )
+
+    # Both: Verify time-stamps are the same for truncated and non-truncated,
+    # except for the additional final sample, which in this case is not junk.
+    np.testing.assert_allclose(
+        temp_trunc[1].time_stamps,
+        temp_no_trunc[1].time_stamps[:n_samples],
+        atol=1e-6,
+    )
+
+
+def test_truncation_vs_no_truncation_bad_timestamp():
+    """Verify clock sync handles corrupt clock offsets and timestamps
+
+    Synchronisation can correctly handle a corrupt final clock offset and bad
+    final timestamp by segmentation. This suggest truncation is unnecessary for
+    synchronisation, but it's up to the user to discard the corrupt
+    segment. However, could the extra final sample still be junk? If it's
+    always a sentinel we could automatically discard it, but as there's a risk
+    it could be valid data it's probably best to let the user decide.
+    """
+    n_samples = 100
+    n_offsets = 20
+    clock_tdiff = 5
+    clock_offset_value = -0.001  # Normal offset: -1ms
+
+    # Create stream with corrupted extra sample and last clock offset
+    time_stamps = np.linspace(0, 101, n_samples + 1)  # One extra sample
+    # Corrupt the last sample timestamp (assuming the bug can sometimes cause this)
+    time_stamps[-1] = time_stamps[-1] + 800000  # Huge time jump
+
+    clock_times = [i * clock_tdiff for i in range(n_offsets)]
+    clock_values = [clock_offset_value] * n_offsets
+
+    # Corrupt the last clock offset (mimics the real bug pattern)
+    clock_times.append(clock_times[-1] + 800000)  # Huge time jump
+    clock_values.append(-750000)  # Huge corrupted value
+
+    temp_trunc = {
+        1: MockStreamData(
+            time_stamps=time_stamps,
+            clock_times=clock_times,
+            clock_values=clock_values,
+        )
+    }
+
+    temp_no_trunc = {
+        1: MockStreamData(
+            time_stamps=time_stamps,
+            clock_times=clock_times,
+            clock_values=clock_values,
+        )
+    }
+
+    streams = {1: {"footer": {"info": {"sample_count": [str(n_samples)]}}}}
+
+    # Apply truncation
+    temp_trunc = _truncate_corrupted_offsets(temp_trunc, streams)
+
+    # Sync truncated stream
+    temp_trunc = _clock_sync(temp_trunc)
+
+    # Truncated: Verify clock segments
+    expected_clock_segments = [(0, 99)]
+
+    np.testing.assert_equal(
+        temp_trunc[1].clock_segments,
+        expected_clock_segments,
+    )
+
+    # Truncated: Verify clock sync
+    expected_timestamps = (time_stamps + clock_offset_value)[:n_samples]
+
+    np.testing.assert_allclose(
+        temp_trunc[1].time_stamps,
+        expected_timestamps,
+        atol=1e-6,
+    )
+
+    # Sync non-truncated stream
+    temp_no_trunc = _clock_sync(temp_no_trunc)
+
+    # Non-truncated: Verify clock segments
+    expected_clock_segments = [(0, 99), (100, 100)]
+
+    np.testing.assert_equal(
+        temp_no_trunc[1].clock_segments,
+        expected_clock_segments,
+    )
+
+    # Non-truncated: Verify clock sync segment 1
+    expected_timestamps = (time_stamps + clock_offset_value)[:n_samples]
+
+    np.testing.assert_allclose(
+        temp_no_trunc[1].time_stamps[
+            slice(
+                temp_no_trunc[1].clock_segments[0][0],
+                temp_no_trunc[1].clock_segments[0][1] + 1,  # Inclusive
+            )
+        ],
+        expected_timestamps,
+        atol=1e-6,
+    )
+
+    # Non-truncated: Verify clock sync segment 2
+    expected_timestamps = np.array(time_stamps[-1] + clock_values[-1])
+
+    np.testing.assert_allclose(
+        temp_no_trunc[1].time_stamps[
+            slice(
+                temp_no_trunc[1].clock_segments[1][0],
+                temp_no_trunc[1].clock_segments[1][1] + 1,  # Inclusive
+            )
+        ],
+        expected_timestamps,
+        atol=1e-6,
+    )
+
+    # Both: Verify time-stamps are the same for truncated and non-truncated,
+    # except for the additional final sample, which is this case is likely
+    # junk.
+    np.testing.assert_allclose(
+        temp_trunc[1].time_stamps,
+        temp_no_trunc[1].time_stamps[:n_samples],
+        atol=1e-6,
+    )
